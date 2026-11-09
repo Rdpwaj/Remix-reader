@@ -6,7 +6,10 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,18 +24,142 @@ class ReaderRepository(
     private val dao: AppDao
 ) {
     private val settingsKey = stringPreferencesKey("global_reader_settings_json")
+    private val fastPrefs = context.getSharedPreferences("reader_fast_cache", Context.MODE_PRIVATE)
 
-    val globalSettingsFlow: Flow<ReaderSettings> = context.dataStore.data.map { prefs ->
-        ReaderSettings.fromJsonString(prefs[settingsKey])
-    }
+    private val _globalSettingsFlow = MutableStateFlow(loadInitialSettingsSync())
+    val globalSettingsFlow: Flow<ReaderSettings> = _globalSettingsFlow.asStateFlow()
 
     val activeNovelsFlow: Flow<List<NovelEntity>> = dao.observeActiveNovels()
+        .onEach { list -> saveCachedNovels(list) }
+
     val deletedNovelsFlow: Flow<List<NovelEntity>> = dao.observeDeletedNovels()
+
     val activeChaptersFlow: Flow<List<ChapterEntity>> = dao.observeActiveChapters()
+        .onEach { list -> saveCachedChapters(list) }
+
     val deletedChaptersFlow: Flow<List<ChapterEntity>> = dao.observeDeletedChapters()
     val allAnnotationsFlow: Flow<List<AnnotationEntity>> = dao.observeAllAnnotations()
     val allGlossaryFlow: Flow<List<GlossaryEntity>> = dao.observeAllGlossary()
     val readingStatsFlow: Flow<List<ReadingStatsEntity>> = dao.observeReadingStats()
+
+    fun loadInitialSettingsSync(): ReaderSettings {
+        val raw = fastPrefs.getString("global_reader_settings_json", null)
+        return if (!raw.isNullOrBlank()) {
+            ReaderSettings.fromJsonString(raw)
+        } else {
+            ReaderSettings(onboardingCompleted = true)
+        }
+    }
+
+    fun loadCachedNovelsSync(): List<NovelEntity> {
+        val raw = fastPrefs.getString("cached_active_novels_v1", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            val list = ArrayList<NovelEntity>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(
+                    NovelEntity(
+                        id = o.optLong("id"),
+                        title = o.optString("title"),
+                        description = o.optString("description"),
+                        colorHex = o.optString("colorHex", "#D97706"),
+                        category = o.optString("category", "عام"),
+                        tags = o.optString("tags", ""),
+                        sortBy = o.optString("sortBy", "NATURAL_NAME"),
+                        sortAscending = o.optBoolean("sortAscending", true),
+                        settingsOverrideJson = o.optString("settingsOverrideJson", "").ifBlank { null },
+                        createdAt = o.optLong("createdAt")
+                    )
+                )
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun loadCachedChaptersSync(): List<ChapterEntity> {
+        val raw = fastPrefs.getString("cached_active_chapters_v1", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            val list = ArrayList<ChapterEntity>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val nId = o.optLong("novelId", -1L)
+                list.add(
+                    ChapterEntity(
+                        id = o.optLong("id"),
+                        novelId = if (nId <= 0L) null else nId,
+                        title = o.optString("title"),
+                        content = "",
+                        format = o.optString("format", "TXT"),
+                        wordCount = o.optInt("wordCount", 0),
+                        readingStatus = o.optString("readingStatus", "NEW"),
+                        translatorStage = o.optString("translatorStage", "DRAFT"),
+                        favorite = o.optBoolean("favorite", false),
+                        tags = o.optString("tags", ""),
+                        paragraphIndex = o.optInt("paragraphIndex", 0),
+                        charOffset = o.optInt("charOffset", 0),
+                        progressPercent = o.optDouble("progressPercent", 0.0).toFloat(),
+                        createdAt = o.optLong("createdAt"),
+                        modifiedAt = o.optLong("modifiedAt"),
+                        lastReadAt = o.optLong("lastReadAt", 0L)
+                    )
+                )
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveCachedNovels(novels: List<NovelEntity>) {
+        try {
+            val arr = JSONArray()
+            for (n in novels) {
+                val o = JSONObject()
+                o.put("id", n.id)
+                o.put("title", n.title)
+                o.put("description", n.description)
+                o.put("colorHex", n.colorHex)
+                o.put("category", n.category)
+                o.put("tags", n.tags)
+                o.put("sortBy", n.sortBy)
+                o.put("sortAscending", n.sortAscending)
+                o.put("settingsOverrideJson", n.settingsOverrideJson ?: "")
+                o.put("createdAt", n.createdAt)
+                arr.put(o)
+            }
+            fastPrefs.edit().putString("cached_active_novels_v1", arr.toString()).apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun saveCachedChapters(chapters: List<ChapterEntity>) {
+        try {
+            val arr = JSONArray()
+            for (c in chapters) {
+                val o = JSONObject()
+                o.put("id", c.id)
+                o.put("novelId", c.novelId ?: -1L)
+                o.put("title", c.title)
+                o.put("format", c.format)
+                o.put("wordCount", c.wordCount)
+                o.put("readingStatus", c.readingStatus)
+                o.put("translatorStage", c.translatorStage)
+                o.put("favorite", c.favorite)
+                o.put("tags", c.tags)
+                o.put("paragraphIndex", c.paragraphIndex)
+                o.put("charOffset", c.charOffset)
+                o.put("progressPercent", c.progressPercent.toDouble())
+                o.put("createdAt", c.createdAt)
+                o.put("modifiedAt", c.modifiedAt)
+                o.put("lastReadAt", c.lastReadAt)
+                arr.put(o)
+            }
+            fastPrefs.edit().putString("cached_active_chapters_v1", arr.toString()).apply()
+        } catch (_: Exception) {}
+    }
 
     fun observeFullChapterById(chapterId: Long): Flow<ChapterEntity?> =
         dao.observeChapterById(chapterId)
@@ -47,15 +174,36 @@ class ReaderRepository(
     }
 
     suspend fun initializeAndSeed() = withContext(Dispatchers.IO) {
+        // 1. Migrate legacy DataStore settings once if fastPrefs is empty
+        if (!fastPrefs.contains("global_reader_settings_json")) {
+            val legacyJson = runCatching { context.dataStore.data.first()[settingsKey] }.getOrNull()
+            if (!legacyJson.isNullOrBlank()) {
+                val migrated = ReaderSettings.fromJsonString(legacyJson).copy(onboardingCompleted = true)
+                fastPrefs.edit().putString("global_reader_settings_json", migrated.toJsonString()).apply()
+                _globalSettingsFlow.value = migrated
+            }
+        }
+
+        // 2. Purge any legacy seeded test chapters/novels once so the user never sees them again
+        if (!fastPrefs.getBoolean("legacy_test_cleaned_v12", false)) {
+            SampleDataSeeder.removeLegacySeededDataIfPresent(dao)
+            fastPrefs.edit().putBoolean("legacy_test_cleaned_v12", true).apply()
+        }
+
+        // 3. Purge expired 30-day trash items
         val cutoff = System.currentTimeMillis() - 30L * 24L * 3600L * 1000L
         dao.purgeExpiredTrashChapters(cutoff)
         dao.purgeExpiredTrashNovels(cutoff)
-        SampleDataSeeder.seedIfEmpty(dao)
     }
 
     suspend fun saveGlobalSettings(settings: ReaderSettings) = withContext(Dispatchers.IO) {
-        context.dataStore.edit { prefs ->
-            prefs[settingsKey] = settings.toJsonString()
+        val json = settings.toJsonString()
+        fastPrefs.edit().putString("global_reader_settings_json", json).apply()
+        _globalSettingsFlow.value = settings
+        runCatching {
+            context.dataStore.edit { prefs ->
+                prefs[settingsKey] = json
+            }
         }
     }
 

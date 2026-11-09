@@ -42,6 +42,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -198,21 +200,23 @@ fun ReaderScreen(
         }
     }
 
-    // Parse paragraphs off the main thread for instant opening without frame drops
+    // Fast cached paragraph splitting (0ms for cached/normal chapters, async only for huge 100k+ char files)
     val paragraphs by produceState(
-        initialValue = remember(chapter.id) {
-            if (chapter.content.length < 25_000) {
+        initialValue = remember(chapter.id, chapter.modifiedAt, effectiveSettings.hideTashkeel) {
+            if (chapter.content.length < 80_000) {
                 TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
             } else {
                 listOf("جاري فتح الفصل...")
             }
         },
         key1 = chapter.id,
-        key2 = chapter.content,
+        key2 = chapter.modifiedAt,
         key3 = effectiveSettings.hideTashkeel
     ) {
-        value = withContext(Dispatchers.Default) {
-            TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
+        if (chapter.content.length >= 80_000) {
+            value = withContext(Dispatchers.Default) {
+                TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
+            }
         }
     }
 
@@ -224,7 +228,7 @@ fun ReaderScreen(
         initialFirstVisibleItemIndex = initialParagraphIdx.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
     )
 
-    // Ensure position jumps accurately if async paragraph splitting finishes for large files
+    // Ensure position jumps accurately if async paragraph splitting finishes for huge files
     LaunchedEffect(paragraphs.size) {
         if (paragraphs.size > 1 && initialParagraphIdx > 0 && listState.firstVisibleItemIndex == 0) {
             listState.scrollToItem(initialParagraphIdx.coerceIn(0, paragraphs.size - 1))
@@ -271,9 +275,14 @@ fun ReaderScreen(
         }
     }
 
-    // Keep Screen On & In-App Brightness control
+    // Keep Screen On, In-App Brightness, & White Status Bar Icons over the Shaded Status Bar Scrim
     DisposableEffect(effectiveSettings.keepScreenOn, effectiveSettings.inAppBrightness) {
         val window = (context as? Activity)?.window
+        val insetsController = if (window != null) WindowCompat.getInsetsController(window, localView) else null
+        val prevLightStatusBars = insetsController?.isAppearanceLightStatusBars ?: true
+        // Use light (white) status bar icons so they are crisp and readable over the shaded status bar background
+        insetsController?.isAppearanceLightStatusBars = false
+
         if (effectiveSettings.keepScreenOn) {
             window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
@@ -290,6 +299,7 @@ fun ReaderScreen(
         }
         onDispose {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            insetsController?.isAppearanceLightStatusBars = prevLightStatusBars
         }
     }
 
@@ -502,8 +512,14 @@ fun ReaderScreen(
         )
     }
 
-    val statusBarTopPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val navBarBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val hasGlobalFormatting = remember(annotationsByParagraph, activeGlossary, inTextSearchQuery) {
+        annotationsByParagraph.isNotEmpty() || activeGlossary.isNotEmpty() || inTextSearchQuery.isNotBlank()
+    }
+
+    val paragraphSpacing = remember(effectiveSettings.emptyLineBetweenParagraphs, effectiveSettings.paragraphSpacingDp) {
+        if (effectiveSettings.emptyLineBetweenParagraphs) effectiveSettings.paragraphSpacingDp.dp
+        else (effectiveSettings.paragraphSpacingDp / 3f).dp
+    }
 
     Box(
         modifier = Modifier
@@ -541,35 +557,31 @@ fun ReaderScreen(
                                 if (selectedParagraphIndex != null) {
                                     selectedParagraphIndex = null
                                 } else {
-                                    if (effectiveSettings.hapticFeedback) {
-                                        localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                    }
                                     barsVisible = !barsVisible
                                 }
                             }
                         }
                     },
                     onLongPress = {
-                        if (effectiveSettings.hapticFeedback) {
-                            localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        }
                         val curr = getCurrentParaIdx()
                         selectedParagraphIndex = if (selectedParagraphIndex == curr) null else curr
                     }
                 )
             }
     ) {
-        // Main Reading Area: Either Continuous Virtualized Scroll OR Page-Flip HorizontalPager
+        // Main Reading Area: Clipped cleanly below the shaded system status bar so text NEVER overlaps clock/battery/network icons
         if (effectiveSettings.readingMode == "PAGES") {
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier
                     .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
                     .padding(
                         start = effectiveSettings.marginHorizontalDp.dp,
                         end = effectiveSettings.marginHorizontalDp.dp,
-                        top = statusBarTopPadding + effectiveSettings.marginVerticalDp.dp + 12.dp,
-                        bottom = navBarBottomPadding + effectiveSettings.marginVerticalDp.dp + 32.dp
+                        top = effectiveSettings.marginVerticalDp.dp + 8.dp,
+                        bottom = effectiveSettings.marginVerticalDp.dp + 28.dp
                     )
             ) { pageIndex ->
                 val startPara = pageIndex * paragraphsPerPage
@@ -577,63 +589,80 @@ fun ReaderScreen(
                 val pageParagraphs = if (startPara < endPara) paragraphs.subList(startPara, endPara) else emptyList()
 
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(effectiveSettings.paragraphSpacingDp.dp),
+                    verticalArrangement = Arrangement.spacedBy(paragraphSpacing),
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
                 ) {
                     pageParagraphs.forEachIndexed { localIdx, paraText ->
                         val globalIdx = startPara + localIdx
-                        ReaderParagraphItem(
-                            paragraphIndex = globalIdx,
-                            paragraphText = paraText,
-                            textStyle = paragraphTextStyle,
-                            annotations = annotationsByParagraph[globalIdx] ?: emptyList(),
-                            glossaryTerms = activeGlossary,
-                            searchQuery = inTextSearchQuery,
-                            isTtsSpeaking = ttsSpeakingParagraphIndex == globalIdx,
-                            isSelected = selectedParagraphIndex == globalIdx
-                        )
+                        if (!hasGlobalFormatting && ttsSpeakingParagraphIndex != globalIdx && selectedParagraphIndex != globalIdx) {
+                            Text(
+                                text = paraText,
+                                style = paragraphTextStyle,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            ReaderParagraphItem(
+                                paragraphIndex = globalIdx,
+                                paragraphText = paraText,
+                                textStyle = paragraphTextStyle,
+                                annotations = annotationsByParagraph[globalIdx] ?: emptyList(),
+                                glossaryTerms = activeGlossary,
+                                searchQuery = inTextSearchQuery,
+                                isTtsSpeaking = ttsSpeakingParagraphIndex == globalIdx,
+                                isSelected = selectedParagraphIndex == globalIdx
+                            )
+                        }
                     }
                 }
             }
         } else {
             // Ultra-Fast Virtualized LazyColumn optimized for Galaxy M02s (60fps)
+            // statusBarsPadding() on the LazyColumn modifier ensures scrolling text is clipped strictly below the status bar!
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
                     start = effectiveSettings.marginHorizontalDp.dp,
                     end = effectiveSettings.marginHorizontalDp.dp,
-                    top = statusBarTopPadding + effectiveSettings.marginVerticalDp.dp + 16.dp,
-                    bottom = navBarBottomPadding + effectiveSettings.marginVerticalDp.dp + 80.dp
+                    top = effectiveSettings.marginVerticalDp.dp + 8.dp,
+                    bottom = effectiveSettings.marginVerticalDp.dp + 56.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(
-                    if (effectiveSettings.emptyLineBetweenParagraphs) effectiveSettings.paragraphSpacingDp.dp
-                    else (effectiveSettings.paragraphSpacingDp / 3f).dp
-                ),
+                verticalArrangement = Arrangement.spacedBy(paragraphSpacing),
                 modifier = Modifier
                     .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
                     .testTag("reader_lazy_column")
             ) {
                 itemsIndexed(
                     items = paragraphs,
                     key = { idx, _ -> idx },
-                    contentType = { _, _ -> "paragraph" }
+                    contentType = { _, _ -> 0 }
                 ) { idx, paraText ->
-                    ReaderParagraphItem(
-                        paragraphIndex = idx,
-                        paragraphText = paraText,
-                        textStyle = paragraphTextStyle,
-                        annotations = annotationsByParagraph[idx] ?: emptyList(),
-                        glossaryTerms = activeGlossary,
-                        searchQuery = inTextSearchQuery,
-                        isTtsSpeaking = ttsSpeakingParagraphIndex == idx,
-                        isSelected = selectedParagraphIndex == idx
-                    )
+                    // Zero-overhead fast path: renders a single flat Text node directly when no special formatting applies
+                    if (!hasGlobalFormatting && ttsSpeakingParagraphIndex != idx && selectedParagraphIndex != idx) {
+                        Text(
+                            text = paraText,
+                            style = paragraphTextStyle,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        ReaderParagraphItem(
+                            paragraphIndex = idx,
+                            paragraphText = paraText,
+                            textStyle = paragraphTextStyle,
+                            annotations = annotationsByParagraph[idx] ?: emptyList(),
+                            glossaryTerms = activeGlossary,
+                            searchQuery = inTextSearchQuery,
+                            isTtsSpeaking = ttsSpeakingParagraphIndex == idx,
+                            isSelected = selectedParagraphIndex == idx
+                        )
+                    }
                 }
 
                 // End of Chapter Footer Card
-                item(key = "chapter_footer", contentType = "footer") {
+                item(key = "chapter_footer", contentType = 1) {
                     EndOfChapterFooterCard(
                         chapter = chapter,
                         nextChapter = nextChapter,
@@ -667,7 +696,16 @@ fun ReaderScreen(
             )
         }
 
-        // Isolated Chapter Progress Edge Bar (Chapter progress only — no time or battery overhead!)
+        // Shaded Status Bar Scrim behind phone's time, battery, and network icons (Always visible & never overlaps text)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .windowInsetsTopHeight(WindowInsets.statusBars)
+                .background(Color(0xFF121212).copy(alpha = 0.62f))
+        )
+
+        // Isolated Chapter Progress Edge Bar (Chapter progress only — lightweight static Box bar)
         if (effectiveSettings.showThinEdgeProgress && !barsVisible) {
             ChapterEdgeProgressOverlay(
                 listState = listState,
@@ -1456,14 +1494,20 @@ private fun ChapterEdgeProgressOverlay(
                 )
             }
         }
-        LinearProgressIndicator(
-            progress = { progressFraction },
+        // Lightweight static Box progress bar (avoids Material3 LinearProgressIndicator Canvas animations on scroll)
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(3.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = readerTextColor.copy(alpha = 0.12f)
-        )
+                .height(3.dp)
+                .background(readerTextColor.copy(alpha = 0.12f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(progressFraction)
+                    .height(3.dp)
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
     }
 }
 

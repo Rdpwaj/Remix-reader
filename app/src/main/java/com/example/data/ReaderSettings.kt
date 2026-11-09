@@ -5,7 +5,7 @@ import org.json.JSONObject
 data class ReaderSettings(
     // Language & Onboarding
     val language: String = "ar", // "ar" or "en"
-    val onboardingCompleted: Boolean = false,
+    val onboardingCompleted: Boolean = true,
 
     // Font Settings
     val fontFamily: String = "Amiri", // Cairo, Tajawal, Amiri, Noto Naskh Arabic, Noto Kufi, Almarai, Scheherazade, Inter, Roboto, Serif, System

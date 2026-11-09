@@ -140,12 +140,7 @@ class MainActivity : ComponentActivity() {
 fun ChapterReaderRoot(viewModel: MainViewModel) {
     val settings by viewModel.globalSettings.collectAsStateWithLifecycle()
     val novels by viewModel.novels.collectAsStateWithLifecycle()
-    val deletedNovels by viewModel.deletedNovels.collectAsStateWithLifecycle()
     val chapters by viewModel.chapters.collectAsStateWithLifecycle()
-    val deletedChapters by viewModel.deletedChapters.collectAsStateWithLifecycle()
-    val annotations by viewModel.annotations.collectAsStateWithLifecycle()
-    val glossary by viewModel.glossary.collectAsStateWithLifecycle()
-    val readingStats by viewModel.readingStats.collectAsStateWithLifecycle()
 
     val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
     val activeChapterId by viewModel.activeChapterId.collectAsStateWithLifecycle()
@@ -228,6 +223,8 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
     if (activeChapterId != null) {
         val readingChapter = activeReadingChapter
         if (readingChapter != null && readingChapter.id == activeChapterId) {
+            val annotations by viewModel.annotations.collectAsStateWithLifecycle()
+            val glossary by viewModel.glossary.collectAsStateWithLifecycle()
             val novel = novels.find { it.id == readingChapter.novelId }
             val sameNovelChapters = remember(chapters, readingChapter.novelId) {
                 chapters.filter { it.novelId == readingChapter.novelId }
@@ -293,6 +290,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                 SubScreen.EDITOR -> {
                     val chToEdit = activeEditingChapter
                     if (chToEdit != null) {
+                        val glossary by viewModel.glossary.collectAsStateWithLifecycle()
                         InAppEditorScreen(
                             viewModel = viewModel,
                             chapter = chToEdit,
@@ -322,6 +320,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                 }
 
                 SubScreen.GLOSSARY -> {
+                    val glossary by viewModel.glossary.collectAsStateWithLifecycle()
                     GlossaryScreen(
                         viewModel = viewModel,
                         novels = novels,
@@ -331,6 +330,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                 }
 
                 SubScreen.ANNOTATIONS -> {
+                    val annotations by viewModel.annotations.collectAsStateWithLifecycle()
                     AnnotationsHubScreen(
                         viewModel = viewModel,
                         annotations = annotations,
@@ -341,6 +341,8 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                 }
 
                 SubScreen.TRASH -> {
+                    val deletedNovels by viewModel.deletedNovels.collectAsStateWithLifecycle()
+                    val deletedChapters by viewModel.deletedChapters.collectAsStateWithLifecycle()
                     TrashBinScreen(
                         viewModel = viewModel,
                         deletedNovels = deletedNovels,
@@ -372,7 +374,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                                 viewModel = viewModel,
                                 chapters = chapters,
                                 novels = novels,
-                                annotations = annotations,
+                                annotations = emptyList(),
                                 settings = settings
                             )
                         }

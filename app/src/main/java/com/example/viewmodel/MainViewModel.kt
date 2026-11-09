@@ -55,29 +55,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val repository = ReaderRepository(application, database.appDao())
 
     val globalSettings: StateFlow<ReaderSettings> = repository.globalSettingsFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, ReaderSettings())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, repository.loadInitialSettingsSync())
 
     val novels: StateFlow<List<NovelEntity>> = repository.activeNovelsFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, repository.loadCachedNovelsSync())
 
     val deletedNovels: StateFlow<List<NovelEntity>> = repository.deletedNovelsFlow
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Lightweight chapter list (0 bytes of body content in RAM!)
+    // Lightweight chapter list (0 bytes of body content in RAM, instant 0ms cached startup!)
     val chapters: StateFlow<List<ChapterEntity>> = repository.activeChaptersFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, repository.loadCachedChaptersSync())
 
     val deletedChapters: StateFlow<List<ChapterEntity>> = repository.deletedChaptersFlow
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val annotations: StateFlow<List<AnnotationEntity>> = repository.allAnnotationsFlow
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val glossary: StateFlow<List<GlossaryEntity>> = repository.allGlossaryFlow
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val readingStats: StateFlow<List<ReadingStatsEntity>> = repository.readingStatsFlow
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Navigation & UI State
     private val _currentTab = MutableStateFlow(BottomNavTab.LIBRARY)

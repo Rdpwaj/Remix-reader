@@ -159,6 +159,26 @@ interface AppDao {
     @Query("DELETE FROM novels WHERE deletedAt IS NOT NULL")
     suspend fun emptyTrashNovels()
 
+    @Query(
+        """
+        DELETE FROM chapters 
+        WHERE title IN (
+            'الفصل 1: عودة حارس الأثر',
+            'الفصل 2: مجلس الحكماء السبعة',
+            'الفصل 10: بوابة وادي السحاب',
+            'مسودة ترجمة سريعة - ملف مستقل',
+            'فصل اختبار الأداء الضخم (500 ألف كلمة)'
+        )
+        OR novelId IN (
+            SELECT id FROM novels WHERE title IN ('سجلات العرش المفقود', 'سجلات المترجم: فجر القلعة المنسية')
+        )
+        """
+    )
+    suspend fun purgeLegacySeededChapters()
+
+    @Query("DELETE FROM novels WHERE title IN ('سجلات العرش المفقود', 'سجلات المترجم: فجر القلعة المنسية')")
+    suspend fun purgeLegacySeededNovels()
+
     // --- Annotations (Bookmarks, Highlights, Notes) ---
     @Query("SELECT * FROM annotations ORDER BY createdAt DESC")
     fun observeAllAnnotations(): Flow<List<AnnotationEntity>>
