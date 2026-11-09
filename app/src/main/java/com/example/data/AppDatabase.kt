@@ -30,6 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "chapter_reader_offline.db"
                 )
+                    .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                     // Keep user data safe across all APK updates (no destructive migration)
                     .build()
                 INSTANCE = instance

@@ -79,15 +79,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val readingStats: StateFlow<List<ReadingStatsEntity>> = repository.readingStatsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // Restore last UI session state synchronously in 0ms on cold start
+    private val initialSessionState = repository.loadUiSessionStateSync()
+
     // Navigation & UI State
-    private val _currentTab = MutableStateFlow(BottomNavTab.LIBRARY)
+    private val _currentTab = MutableStateFlow(
+        runCatching { BottomNavTab.valueOf(initialSessionState.currentTabName) }
+            .getOrDefault(BottomNavTab.LIBRARY)
+            .let { if (it == BottomNavTab.STATS) BottomNavTab.CONTINUE else it }
+    )
     val currentTab: StateFlow<BottomNavTab> = _currentTab.asStateFlow()
 
-    private val _activeChapterId = MutableStateFlow<Long?>(null)
+    private val _activeChapterId = MutableStateFlow<Long?>(initialSessionState.activeChapterId)
     val activeChapterId: StateFlow<Long?> = _activeChapterId.asStateFlow()
 
     // Full chapter content loaded ONLY for the single currently active chapter in Reader.
-    // Ignore background position updates on the same chapter ID so scrolling never triggers full-screen recomposition!
+    // Initialized synchronously from hot cache so resuming reading on app launch takes 0ms!
     val activeReadingChapter: StateFlow<ChapterEntity?> = _activeChapterId
         .flatMapLatest { id ->
             if (id == null) flowOf(null) else repository.observeFullChapterById(id)
@@ -98,7 +105,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 old?.content == new?.content &&
                 old?.translatorStage == new?.translatorStage
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = initialSessionState.activeChapterId?.let { repository.getCachedHotChapter(it) }
+        )
 
     private val _activeSubScreen = MutableStateFlow(SubScreen.NONE)
     val activeSubScreen: StateFlow<SubScreen> = _activeSubScreen.asStateFlow()
@@ -113,8 +124,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    // Library Filter & Selection State
-    private val _selectedNovelId = MutableStateFlow<Long?>(null)
+    // Library Filter & Selection State (restored synchronously from cached session)
+    private val _selectedNovelId = MutableStateFlow<Long?>(initialSessionState.selectedNovelId)
     val selectedNovelId: StateFlow<Long?> = _selectedNovelId.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
@@ -128,7 +139,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
 
-    private val _statusFilter = MutableStateFlow("ALL")
+    private val _statusFilter = MutableStateFlow(initialSessionState.statusFilter)
     val statusFilter: StateFlow<String> = _statusFilter.asStateFlow()
 
     private val _tagFilter = MutableStateFlow<String?>(null)
@@ -152,9 +163,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun saveUiSessionQuick() {
+        repository.saveUiSessionStateSync(
+            currentTabName = _currentTab.value.name,
+            selectedNovelId = _selectedNovelId.value,
+            statusFilter = _statusFilter.value,
+            activeChapterId = _activeChapterId.value
+        )
+    }
+
+    /**
+     * Called from MainActivity.onPause / onStop to cache all essential data before app closes.
+     */
+    fun persistEssentialStateOnClose() {
+        saveUiSessionQuick()
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.flushEssentialCacheOnClose(
+                settings = globalSettings.value,
+                novels = novels.value,
+                chapters = chapters.value,
+                currentTabName = _currentTab.value.name,
+                selectedNovelId = _selectedNovelId.value,
+                statusFilter = _statusFilter.value,
+                activeChapterId = _activeChapterId.value,
+                activeReadingChapter = activeReadingChapter.value
+            )
+        }
+    }
+
     fun selectTab(tab: BottomNavTab) {
         _activeSubScreen.value = SubScreen.NONE
         _currentTab.value = tab
+        saveUiSessionQuick()
     }
 
     fun openSubScreen(subScreen: SubScreen, chapterIdForEdit: Long? = null) {
@@ -170,15 +210,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openChapterForReading(chapterId: Long) {
         _activeChapterId.value = chapterId
+        saveUiSessionQuick()
     }
 
     fun closeReader() {
         _activeChapterId.value = null
+        saveUiSessionQuick()
     }
 
     fun setSelectedNovelId(novelId: Long?) {
         _selectedNovelId.value = novelId
         clearMultiSelection()
+        saveUiSessionQuick()
     }
 
     fun setSearchQuery(query: String) {
@@ -187,6 +230,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setStatusFilter(filter: String) {
         _statusFilter.value = filter
+        saveUiSessionQuick()
     }
 
     fun setTagFilter(tag: String?) {

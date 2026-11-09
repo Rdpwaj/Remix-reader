@@ -1,6 +1,7 @@
 package com.example.data
 
 import android.content.Context
+import android.util.LruCache
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -10,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -19,12 +21,23 @@ import java.util.Locale
 
 private val Context.dataStore by preferencesDataStore(name = "reader_preferences")
 
+data class CachedUiSessionState(
+    val currentTabName: String = "LIBRARY",
+    val selectedNovelId: Long? = null,
+    val statusFilter: String = "ALL",
+    val activeChapterId: Long? = null
+)
+
 class ReaderRepository(
     private val context: Context,
     private val dao: AppDao
 ) {
     private val settingsKey = stringPreferencesKey("global_reader_settings_json")
+    private val sessionStateKey = stringPreferencesKey("cached_ui_session_state_json")
     private val fastPrefs = context.getSharedPreferences("reader_fast_cache", Context.MODE_PRIVATE)
+
+    // In-memory LRU cache of full chapters (with content) for 0ms instant opening
+    private val hotChaptersRamCache = LruCache<Long, ChapterEntity>(8)
 
     private val _globalSettingsFlow = MutableStateFlow(loadInitialSettingsSync())
     val globalSettingsFlow: Flow<ReaderSettings> = _globalSettingsFlow.asStateFlow()
@@ -42,12 +55,161 @@ class ReaderRepository(
     val allGlossaryFlow: Flow<List<GlossaryEntity>> = dao.observeAllGlossary()
     val readingStatsFlow: Flow<List<ReadingStatsEntity>> = dao.observeReadingStats()
 
+    init {
+        // Pre-warm the hot chapter into RAM and paragraph LruCache on repository creation
+        loadCachedHotChapterSync()?.let { hot ->
+            hotChaptersRamCache.put(hot.id, hot)
+            if (hot.content.isNotBlank() && hot.content.length < 80_000) {
+                TextProcessingUtils.splitIntoParagraphs(hot.content, _globalSettingsFlow.value.hideTashkeel)
+            }
+        }
+    }
+
     fun loadInitialSettingsSync(): ReaderSettings {
         val raw = fastPrefs.getString("global_reader_settings_json", null)
         return if (!raw.isNullOrBlank()) {
             ReaderSettings.fromJsonString(raw)
         } else {
             ReaderSettings(onboardingCompleted = true)
+        }
+    }
+
+    fun loadUiSessionStateSync(): CachedUiSessionState {
+        val raw = fastPrefs.getString("cached_ui_session_state_v1", null) ?: return CachedUiSessionState()
+        return try {
+            val o = JSONObject(raw)
+            val novelId = o.optLong("selectedNovelId", -1L)
+            val activeChId = o.optLong("activeChapterId", -1L)
+            CachedUiSessionState(
+                currentTabName = o.optString("currentTabName", "LIBRARY"),
+                selectedNovelId = if (novelId <= 0L) null else novelId,
+                statusFilter = o.optString("statusFilter", "ALL"),
+                activeChapterId = if (activeChId <= 0L) null else activeChId
+            )
+        } catch (_: Exception) {
+            CachedUiSessionState()
+        }
+    }
+
+    fun saveUiSessionStateSync(
+        currentTabName: String,
+        selectedNovelId: Long?,
+        statusFilter: String,
+        activeChapterId: Long?
+    ) {
+        try {
+            val o = JSONObject()
+            o.put("currentTabName", currentTabName)
+            o.put("selectedNovelId", selectedNovelId ?: -1L)
+            o.put("statusFilter", statusFilter)
+            o.put("activeChapterId", activeChapterId ?: -1L)
+            val json = o.toString()
+            fastPrefs.edit().putString("cached_ui_session_state_v1", json).apply()
+        } catch (_: Exception) {}
+    }
+
+    fun loadCachedHotChapterSync(): ChapterEntity? {
+        val raw = fastPrefs.getString("cached_hot_chapter_v1", null) ?: return null
+        return try {
+            val o = JSONObject(raw)
+            val id = o.optLong("id", -1L)
+            if (id <= 0L) return null
+            val nId = o.optLong("novelId", -1L)
+            ChapterEntity(
+                id = id,
+                novelId = if (nId <= 0L) null else nId,
+                title = o.optString("title"),
+                content = o.optString("content"),
+                format = o.optString("format", "TXT"),
+                wordCount = o.optInt("wordCount", 0),
+                readingStatus = o.optString("readingStatus", "NEW"),
+                translatorStage = o.optString("translatorStage", "DRAFT"),
+                favorite = o.optBoolean("favorite", false),
+                tags = o.optString("tags", ""),
+                paragraphIndex = o.optInt("paragraphIndex", 0),
+                charOffset = o.optInt("charOffset", 0),
+                progressPercent = o.optDouble("progressPercent", 0.0).toFloat(),
+                createdAt = o.optLong("createdAt"),
+                modifiedAt = o.optLong("modifiedAt"),
+                lastReadAt = o.optLong("lastReadAt", 0L)
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun getCachedHotChapter(chapterId: Long): ChapterEntity? {
+        hotChaptersRamCache.get(chapterId)?.let { return it }
+        val diskHot = loadCachedHotChapterSync()
+        if (diskHot != null && diskHot.id == chapterId) {
+            hotChaptersRamCache.put(chapterId, diskHot)
+            return diskHot
+        }
+        return null
+    }
+
+    fun cacheHotChapterSync(chapter: ChapterEntity) {
+        if (chapter.content.isEmpty()) return
+        hotChaptersRamCache.put(chapter.id, chapter)
+        // Only persist chapters under 250KB to SharedPreferences so disk flush is < 2ms
+        if (chapter.content.length <= 250_000) {
+            try {
+                val o = JSONObject()
+                o.put("id", chapter.id)
+                o.put("novelId", chapter.novelId ?: -1L)
+                o.put("title", chapter.title)
+                o.put("content", chapter.content)
+                o.put("format", chapter.format)
+                o.put("wordCount", chapter.wordCount)
+                o.put("readingStatus", chapter.readingStatus)
+                o.put("translatorStage", chapter.translatorStage)
+                o.put("favorite", chapter.favorite)
+                o.put("tags", chapter.tags)
+                o.put("paragraphIndex", chapter.paragraphIndex)
+                o.put("charOffset", chapter.charOffset)
+                o.put("progressPercent", chapter.progressPercent.toDouble())
+                o.put("createdAt", chapter.createdAt)
+                o.put("modifiedAt", chapter.modifiedAt)
+                o.put("lastReadAt", chapter.lastReadAt)
+                fastPrefs.edit().putString("cached_hot_chapter_v1", o.toString()).apply()
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Flushes all essential application state to local cache & DataStore when the app is closing/pausing.
+     */
+    suspend fun flushEssentialCacheOnClose(
+        settings: ReaderSettings,
+        novels: List<NovelEntity>,
+        chapters: List<ChapterEntity>,
+        currentTabName: String,
+        selectedNovelId: Long?,
+        statusFilter: String,
+        activeChapterId: Long?,
+        activeReadingChapter: ChapterEntity?
+    ) = withContext(Dispatchers.IO) {
+        val settingsJson = settings.toJsonString()
+        fastPrefs.edit().putString("global_reader_settings_json", settingsJson).apply()
+        saveUiSessionStateSync(currentTabName, selectedNovelId, statusFilter, activeChapterId)
+        if (novels.isNotEmpty()) saveCachedNovels(novels)
+        if (chapters.isNotEmpty()) saveCachedChapters(chapters)
+
+        val chapterToCache = activeReadingChapter
+            ?: activeChapterId?.let { dao.getChapterById(it) }
+            ?: chapters.maxByOrNull { it.lastReadAt }?.let { dao.getChapterById(it.id) }
+
+        if (chapterToCache != null) {
+            cacheHotChapterSync(chapterToCache)
+        }
+
+        runCatching {
+            context.dataStore.edit { prefs ->
+                prefs[settingsKey] = settingsJson
+                fastPrefs.getString("cached_ui_session_state_v1", null)?.let {
+                    prefs[sessionStateKey] = it
+                }
+            }
         }
     }
 
@@ -163,9 +325,17 @@ class ReaderRepository(
 
     fun observeFullChapterById(chapterId: Long): Flow<ChapterEntity?> =
         dao.observeChapterById(chapterId)
+            .onStart {
+                getCachedHotChapter(chapterId)?.let { emit(it) }
+            }
+            .onEach { ch ->
+                if (ch != null) {
+                    cacheHotChapterSync(ch)
+                }
+            }
 
     suspend fun getFullChapterById(chapterId: Long): ChapterEntity? = withContext(Dispatchers.IO) {
-        dao.getChapterById(chapterId)
+        getCachedHotChapter(chapterId) ?: dao.getChapterById(chapterId)?.also { cacheHotChapterSync(it) }
     }
 
     suspend fun searchActiveChapterIds(query: String): Set<Long> = withContext(Dispatchers.IO) {
@@ -303,13 +473,13 @@ class ReaderRepository(
         } else {
             chapter.wordCount
         }
-        dao.updateChapter(
-            chapter.copy(
-                content = actualContent,
-                wordCount = updatedWords,
-                modifiedAt = System.currentTimeMillis()
-            )
+        val updatedEntity = chapter.copy(
+            content = actualContent,
+            wordCount = updatedWords,
+            modifiedAt = System.currentTimeMillis()
         )
+        dao.updateChapter(updatedEntity)
+        cacheHotChapterSync(updatedEntity)
     }
 
     suspend fun saveReadingPosition(
@@ -329,14 +499,27 @@ class ReaderRepository(
             rawPercent > 0f || paragraphIndex > 0 || charOffset > 0 -> "READING"
             else -> "NEW"
         }
+        val finalPercent = if (status == "COMPLETED") 100f else rawPercent
+        val now = System.currentTimeMillis()
         dao.updateReadingPosition(
             chapterId = chapterId,
             paragraphIndex = paragraphIndex,
             charOffset = charOffset,
-            progressPercent = if (status == "COMPLETED") 100f else rawPercent,
+            progressPercent = finalPercent,
             readingStatus = status,
-            lastReadAt = System.currentTimeMillis()
+            lastReadAt = now
         )
+        getCachedHotChapter(chapterId)?.let { cached ->
+            cacheHotChapterSync(
+                cached.copy(
+                    paragraphIndex = paragraphIndex,
+                    charOffset = charOffset,
+                    progressPercent = finalPercent,
+                    readingStatus = status,
+                    lastReadAt = now
+                )
+            )
+        }
     }
 
     suspend fun duplicateChapter(chapter: ChapterEntity): Long = withContext(Dispatchers.IO) {

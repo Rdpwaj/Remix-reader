@@ -87,6 +87,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onPause() {
+        viewModel.persistEssentialStateOnClose()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        viewModel.persistEssentialStateOnClose()
+        super.onStop()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
@@ -219,10 +229,13 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
         return
     }
 
-    // 2. Full-Screen Reader Mode
-    if (activeChapterId != null) {
-        val readingChapter = activeReadingChapter
-        if (readingChapter != null && readingChapter.id == activeChapterId) {
+    // 2. Full-Screen Reader Mode (Instant 0ms display via Hot Chapter Cache)
+    val currentActiveId = activeChapterId
+    if (currentActiveId != null) {
+        val readingChapter = (activeReadingChapter?.takeIf { it.id == currentActiveId })
+            ?: remember(currentActiveId) { viewModel.repository.getCachedHotChapter(currentActiveId) }
+
+        if (readingChapter != null && readingChapter.id == currentActiveId) {
             val annotations by viewModel.annotations.collectAsStateWithLifecycle()
             val glossary by viewModel.glossary.collectAsStateWithLifecycle()
             val novel = novels.find { it.id == readingChapter.novelId }
@@ -245,6 +258,12 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                 }
             )
         } else {
+            LaunchedEffect(currentActiveId) {
+                delay(1200L)
+                if (viewModel.activeReadingChapter.value == null) {
+                    viewModel.closeReader()
+                }
+            }
             Surface(modifier = Modifier.fillMaxSize()) {}
         }
         return
