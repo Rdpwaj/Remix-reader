@@ -149,25 +149,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ChapterReaderRoot(viewModel: MainViewModel) {
     val settings by viewModel.globalSettings.collectAsStateWithLifecycle()
-    val novels by viewModel.novels.collectAsStateWithLifecycle()
-    val chapters by viewModel.chapters.collectAsStateWithLifecycle()
-
-    val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
     val activeChapterId by viewModel.activeChapterId.collectAsStateWithLifecycle()
-    val activeReadingChapter by viewModel.activeReadingChapter.collectAsStateWithLifecycle()
-    val activeSubScreen by viewModel.activeSubScreen.collectAsStateWithLifecycle()
-    val editingChapterId by viewModel.editingChapterId.collectAsStateWithLifecycle()
-    val activeEditingChapter by viewModel.activeEditingChapter.collectAsStateWithLifecycle()
-
-    val selectedNovelId by viewModel.selectedNovelId.collectAsStateWithLifecycle()
-    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
-    val searchMatchedChapterIds by viewModel.searchMatchedChapterIds.collectAsStateWithLifecycle()
-    val statusFilter by viewModel.statusFilter.collectAsStateWithLifecycle()
-    val tagFilter by viewModel.tagFilter.collectAsStateWithLifecycle()
-    val selectedChapterIds by viewModel.selectedChapterIds.collectAsStateWithLifecycle()
-    val undoBanner by viewModel.undoBanner.collectAsStateWithLifecycle()
     val statusMessage by viewModel.statusMessage.collectAsStateWithLifecycle()
-    val sharedIncomingText by viewModel.sharedIncomingText.collectAsStateWithLifecycle()
 
     var pinUnlocked by remember { mutableStateOf(false) }
 
@@ -229,16 +212,21 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
         return
     }
 
-    // 2. Full-Screen Reader Mode (Instant 0ms display via Hot Chapter Cache)
+    // 2. Full-Screen Reader Mode (Instant 0ms display via Hot Chapter Cache & Isolated State)
     val currentActiveId = activeChapterId
     if (currentActiveId != null) {
+        val activeReadingChapter by viewModel.activeReadingChapter.collectAsStateWithLifecycle()
         val readingChapter = (activeReadingChapter?.takeIf { it.id == currentActiveId })
             ?: remember(currentActiveId) { viewModel.repository.getCachedHotChapter(currentActiveId) }
 
         if (readingChapter != null && readingChapter.id == currentActiveId) {
+            val novels by viewModel.novels.collectAsStateWithLifecycle()
+            val chapters by viewModel.chapters.collectAsStateWithLifecycle()
             val annotations by viewModel.annotations.collectAsStateWithLifecycle()
             val glossary by viewModel.glossary.collectAsStateWithLifecycle()
-            val novel = novels.find { it.id == readingChapter.novelId }
+            val novel = remember(novels, readingChapter.novelId) {
+                novels.find { it.id == readingChapter.novelId }
+            }
             val sameNovelChapters = remember(chapters, readingChapter.novelId) {
                 chapters.filter { it.novelId == readingChapter.novelId }
                     .sortedWith { a, b -> TextProcessingUtils.naturalCompare(a.title, b.title) }
@@ -268,6 +256,13 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
         }
         return
     }
+
+    val novels by viewModel.novels.collectAsStateWithLifecycle()
+    val chapters by viewModel.chapters.collectAsStateWithLifecycle()
+    val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
+    val activeSubScreen by viewModel.activeSubScreen.collectAsStateWithLifecycle()
+    val editingChapterId by viewModel.editingChapterId.collectAsStateWithLifecycle()
+    val undoBanner by viewModel.undoBanner.collectAsStateWithLifecycle()
 
     // 3. Main App Scaffold with Bottom Navigation & SubScreens
     Scaffold(
@@ -307,6 +302,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
         ) {
             when (activeSubScreen) {
                 SubScreen.EDITOR -> {
+                    val activeEditingChapter by viewModel.activeEditingChapter.collectAsStateWithLifecycle()
                     val chToEdit = activeEditingChapter
                     if (chToEdit != null) {
                         val glossary by viewModel.glossary.collectAsStateWithLifecycle()
@@ -373,6 +369,14 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                 SubScreen.NONE -> {
                     when (currentTab) {
                         BottomNavTab.LIBRARY -> {
+                            val selectedNovelId by viewModel.selectedNovelId.collectAsStateWithLifecycle()
+                            val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+                            val searchMatchedChapterIds by viewModel.searchMatchedChapterIds.collectAsStateWithLifecycle()
+                            val statusFilter by viewModel.statusFilter.collectAsStateWithLifecycle()
+                            val tagFilter by viewModel.tagFilter.collectAsStateWithLifecycle()
+                            val selectedChapterIds by viewModel.selectedChapterIds.collectAsStateWithLifecycle()
+                            val sharedIncomingText by viewModel.sharedIncomingText.collectAsStateWithLifecycle()
+
                             LibraryScreen(
                                 viewModel = viewModel,
                                 novels = novels,

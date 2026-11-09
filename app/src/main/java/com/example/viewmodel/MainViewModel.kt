@@ -548,8 +548,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- Reading Position & Auto-Learning WPM ---
+    // --- Reading Position ---
+    fun updateInMemoryReadingPosition(chapterId: Long, paragraphIndex: Int, charOffset: Int, totalParagraphs: Int) {
+        repository.updateHotChapterPositionInRam(chapterId, paragraphIndex, charOffset, totalParagraphs)
+    }
+
     fun saveReadingPosition(chapterId: Long, paragraphIndex: Int, charOffset: Int, totalParagraphs: Int) {
+        repository.updateHotChapterPositionInRam(chapterId, paragraphIndex, charOffset, totalParagraphs)
         viewModelScope.launch(Dispatchers.IO) {
             repository.saveReadingPosition(chapterId, paragraphIndex, charOffset, totalParagraphs)
         }

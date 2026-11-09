@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
@@ -44,16 +45,23 @@ class ReaderRepository(
 
     val activeNovelsFlow: Flow<List<NovelEntity>> = dao.observeActiveNovels()
         .onEach { list -> saveCachedNovels(list) }
+        .flowOn(Dispatchers.IO)
 
     val deletedNovelsFlow: Flow<List<NovelEntity>> = dao.observeDeletedNovels()
+        .flowOn(Dispatchers.IO)
 
     val activeChaptersFlow: Flow<List<ChapterEntity>> = dao.observeActiveChapters()
         .onEach { list -> saveCachedChapters(list) }
+        .flowOn(Dispatchers.IO)
 
     val deletedChaptersFlow: Flow<List<ChapterEntity>> = dao.observeDeletedChapters()
+        .flowOn(Dispatchers.IO)
     val allAnnotationsFlow: Flow<List<AnnotationEntity>> = dao.observeAllAnnotations()
+        .flowOn(Dispatchers.IO)
     val allGlossaryFlow: Flow<List<GlossaryEntity>> = dao.observeAllGlossary()
+        .flowOn(Dispatchers.IO)
     val readingStatsFlow: Flow<List<ReadingStatsEntity>> = dao.observeReadingStats()
+        .flowOn(Dispatchers.IO)
 
     init {
         // Pre-warm the hot chapter into RAM and paragraph LruCache on repository creation
@@ -329,13 +337,45 @@ class ReaderRepository(
                 getCachedHotChapter(chapterId)?.let { emit(it) }
             }
             .onEach { ch ->
-                if (ch != null) {
-                    cacheHotChapterSync(ch)
+                if (ch != null && ch.content.isNotEmpty()) {
+                    hotChaptersRamCache.put(ch.id, ch)
                 }
             }
+            .flowOn(Dispatchers.IO)
 
     suspend fun getFullChapterById(chapterId: Long): ChapterEntity? = withContext(Dispatchers.IO) {
-        getCachedHotChapter(chapterId) ?: dao.getChapterById(chapterId)?.also { cacheHotChapterSync(it) }
+        getCachedHotChapter(chapterId) ?: dao.getChapterById(chapterId)?.also { hotChaptersRamCache.put(it.id, it) }
+    }
+
+    /**
+     * Zero-latency in-memory position update during active Reader scrolling.
+     * Avoids triggering Room table invalidations and UI recompositions while the user is scrolling.
+     */
+    fun updateHotChapterPositionInRam(
+        chapterId: Long,
+        paragraphIndex: Int,
+        charOffset: Int,
+        totalParagraphs: Int
+    ) {
+        val cached = hotChaptersRamCache.get(chapterId) ?: return
+        val safeTotal = totalParagraphs.coerceAtLeast(1)
+        val rawPercent = if (safeTotal <= 1) 100f else ((paragraphIndex.toFloat() / (safeTotal - 1).toFloat()) * 100f).coerceIn(0f, 100f)
+        val status = when {
+            rawPercent >= 96f -> "COMPLETED"
+            rawPercent > 0f || paragraphIndex > 0 || charOffset > 0 -> "READING"
+            else -> "NEW"
+        }
+        val finalPercent = if (status == "COMPLETED") 100f else rawPercent
+        hotChaptersRamCache.put(
+            chapterId,
+            cached.copy(
+                paragraphIndex = paragraphIndex,
+                charOffset = charOffset,
+                progressPercent = finalPercent,
+                readingStatus = status,
+                lastReadAt = System.currentTimeMillis()
+            )
+        )
     }
 
     suspend fun searchActiveChapterIds(query: String): Set<Long> = withContext(Dispatchers.IO) {

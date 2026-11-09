@@ -50,23 +50,23 @@ jobs:
       - name: Build Debug APK
         run: |
           gradle assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.2.apk
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.3.apk
 
       - name: Upload APK to Actions Artifacts (ZIP)
         uses: actions/upload-artifact@v4
         with:
-          name: ChapterReader-v1.2-APK-Zip
-          path: app/build/outputs/apk/debug/ChapterReader-v1.2.apk
+          name: ChapterReader-v1.3-APK-Zip
+          path: app/build/outputs/apk/debug/ChapterReader-v1.3.apk
 
       - name: Publish Direct APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.${{ github.run_number }}
-          name: "قارئ الفصول v1.2 (بناء #${{ github.run_number }}) - ملف APK مباشر"
+          tag_name: v1.3.${{ github.run_number }}
+          name: "قارئ الفصول v1.3 (بناء #${{ github.run_number }}) - محرك قراءة أصلي 60fps"
           body: |
-            ### تحميل تحديث تطبيق «قارئ الفصول» للأندرويد (v1.2) 📖⚡
-            - **تحديث سريع وخفيف (مُحسّن لأجهزة مثل Galaxy M02s):** تمرير فائق السلاسة 60fps داخل الفصول، وإزالة إحصائيات الوقت والكلمات والاكتفاء بعدّاد تقدّم الفصل فقط، وتبسيط أسماء الأدوات والتنقل.
-            - **تثبيت مباشر كتحديث:** حمّل ملف **`ChapterReader-v1.2.apk`** من قسم **Assets** بالأسفل وثبّته مباشرة فوق النسخة الحالية دون حذف بياناتك.
-          files: app/build/outputs/apk/debug/ChapterReader-v1.2.apk
+            ### تحميل تحديث تطبيق «قارئ الفصول» للأندرويد (v1.3) 📖⚡
+            - **محرك قراءة أندرويد أصلي (Native Hardware-Accelerated 60fps):** استبدال محرك التمرير بمحرك أندرويد الأصلي (`Native ListView + Recycled TextView`) مع نقل كافة عمليات الكاش إلى الخلفية لضمان سرعة 60 إطارًا في الثانية على هاتف **Galaxy M02s** بدون أي تقطيع.
+            - **تثبيت مباشر كتحديث:** حمّل ملف **`ChapterReader-v1.3.apk`** من قسم **Assets** بالأسفل وثبّته مباشرة فوق النسخة الحالية دون حذف بياناتك.
+          files: app/build/outputs/apk/debug/ChapterReader-v1.3.apk
           prerelease: false
           make_latest: true

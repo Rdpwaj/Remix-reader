@@ -193,9 +193,14 @@ fun LibraryScreen(
         }
     }
 
-    val currentNovel = remember(novels, selectedNovelId) {
-        novels.find { it.id == selectedNovelId }
+    val novelsById = remember(novels) {
+        novels.associateBy { it.id }
     }
+    val chapterCountByNovelId = remember(chapters) {
+        chapters.groupingBy { it.novelId }.eachCount()
+    }
+
+    val currentNovel = selectedNovelId?.let { novelsById[it] }
     val activeSortBy = currentNovel?.sortBy ?: "NATURAL_NAME"
     val activeSortAsc = currentNovel?.sortAscending ?: true
 
@@ -522,7 +527,7 @@ fun LibraryScreen(
                     )
                 }
                 items(novels, key = { it.id }) { novel ->
-                    val count = chapters.count { it.novelId == novel.id }
+                    val count = chapterCountByNovelId[novel.id] ?: 0
                     val novelColor = parseColorSafe(novel.colorHex, MaterialTheme.colorScheme.primary)
                     FilterChip(
                         selected = selectedNovelId == novel.id,
@@ -556,7 +561,7 @@ fun LibraryScreen(
                     )
                 }
                 item {
-                    val standaloneCount = chapters.count { it.novelId == null }
+                    val standaloneCount = chapterCountByNovelId[null] ?: 0
                     if (standaloneCount > 0 || selectedNovelId == -1L) {
                         FilterChip(
                             selected = selectedNovelId == -1L,
@@ -624,10 +629,10 @@ fun LibraryScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(filteredChapters, key = { it.id }) { chapter ->
+                            items(filteredChapters, key = { it.id }, contentType = { 0 }) { chapter ->
                                 ChapterCardItem(
                                     chapter = chapter,
-                                    novel = novels.find { it.id == chapter.novelId },
+                                    novel = chapter.novelId?.let { novelsById[it] },
                                     settings = settings,
                                     isSelected = selectedChapterIds.contains(chapter.id),
                                     isCompact = false,
@@ -660,10 +665,10 @@ fun LibraryScreen(
                         ) {
                             // Top "Continue Reading" Card
                             if (lastReadChapter != null && searchQuery.isBlank() && selectedChapterIds.isEmpty()) {
-                                item(key = "continue_reading_card") {
+                                item(key = "continue_reading_card", contentType = 1) {
                                     ContinueReadingHeroCard(
                                         chapter = lastReadChapter,
-                                        novel = novels.find { it.id == lastReadChapter.novelId },
+                                        novel = lastReadChapter.novelId?.let { novelsById[it] },
                                         settings = settings,
                                         onContinueClick = {
                                             viewModel.openChapterForReading(lastReadChapter.id)
@@ -672,10 +677,10 @@ fun LibraryScreen(
                                 }
                             }
 
-                            items(filteredChapters, key = { it.id }) { chapter ->
+                            items(filteredChapters, key = { it.id }, contentType = { 0 }) { chapter ->
                                 ChapterCardItem(
                                     chapter = chapter,
-                                    novel = novels.find { it.id == chapter.novelId },
+                                    novel = chapter.novelId?.let { novelsById[it] },
                                     settings = settings,
                                     isSelected = selectedChapterIds.contains(chapter.id),
                                     isCompact = settings.libraryViewMode == "COMPACT",
@@ -1362,15 +1367,21 @@ private fun ContinueReadingHeroCard(
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    progress = { (chapter.progressPercent / 100f).coerceIn(0f, 1f) },
+                val heroFraction = (chapter.progressPercent / 100f).coerceIn(0f, 1f)
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
-                        .clip(RoundedCornerShape(4.dp)),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f)
-                )
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(heroFraction)
+                            .height(6.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
             Spacer(modifier = Modifier.width(12.dp))
             Surface(
@@ -1390,7 +1401,6 @@ private fun ContinueReadingHeroCard(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChapterCardItem(
     chapter: ChapterEntity,
@@ -1404,6 +1414,7 @@ private fun ChapterCardItem(
     onMoreClick: () -> Unit
 ) {
     Card(
+        onClick = onClick,
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) {
@@ -1415,10 +1426,6 @@ private fun ChapterCardItem(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
             .testTag("chapter_item_${chapter.id}")
     ) {
         Column(
@@ -1529,18 +1536,24 @@ private fun ChapterCardItem(
                 }
             }
 
-            // Chapter Progress Bar
+            // Lightweight static Box Chapter Progress Bar (Zero Canvas animation overhead on Galaxy M02s)
             if (settings.libShowProgress) {
                 Spacer(modifier = Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { (chapter.progressPercent / 100f).coerceIn(0f, 1f) },
+                val fraction = (chapter.progressPercent / 100f).coerceIn(0f, 1f)
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
         }
     }

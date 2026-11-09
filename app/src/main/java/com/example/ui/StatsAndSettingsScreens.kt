@@ -110,6 +110,7 @@ fun ContinueReadingTabScreen(
     settings: ReaderSettings,
     modifier: Modifier = Modifier
 ) {
+    val novelsById = remember(novels) { novels.associateBy { it.id } }
     val inProgressChapters = remember(chapters) {
         chapters.filter { it.readingStatus == "READING" || it.lastReadAt > 0L }
             .sortedByDescending { it.lastReadAt }
@@ -145,8 +146,8 @@ fun ContinueReadingTabScreen(
                     fontWeight = FontWeight.Bold
                 )
             }
-            items(inProgressChapters, key = { "prog_${it.id}" }) { ch ->
-                val novel = novels.find { it.id == ch.novelId }
+            items(inProgressChapters, key = { "prog_${it.id}" }, contentType = { 0 }) { ch ->
+                val novel = ch.novelId?.let { novelsById[it] }
                 ElevatedCard(
                     onClick = { viewModel.openChapterForReading(ch.id) },
                     shape = RoundedCornerShape(16.dp),
@@ -177,13 +178,21 @@ fun ContinueReadingTabScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Spacer(modifier = Modifier.height(6.dp))
-                            LinearProgressIndicator(
-                                progress = { (ch.progressPercent / 100f).coerceIn(0f, 1f) },
+                            val frac = (ch.progressPercent / 100f).coerceIn(0f, 1f)
+                            Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(5.dp)
                                     .clip(RoundedCornerShape(3.dp))
-                            )
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(frac)
+                                        .height(5.dp)
+                                        .background(MaterialTheme.colorScheme.primary)
+                                )
+                            }
                         }
                         Spacer(modifier = Modifier.width(12.dp))
                         Button(onClick = { viewModel.openChapterForReading(ch.id) }) {

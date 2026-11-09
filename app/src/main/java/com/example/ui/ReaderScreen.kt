@@ -5,11 +5,31 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.os.BatteryManager
+import android.os.Build
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.text.Layout
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.AbsListView
+import android.widget.BaseAdapter
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -121,6 +141,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -134,6 +155,7 @@ import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -156,6 +178,7 @@ import com.example.ui.theme.ReaderPaperText
 import com.example.ui.theme.ReaderSepiaBg
 import com.example.ui.theme.ReaderSepiaText
 import com.example.ui.theme.resolveReaderFontFamily
+import com.example.ui.theme.resolveReaderTypeface
 import com.example.viewmodel.MainViewModel
 import com.example.viewmodel.SubScreen
 import kotlinx.coroutines.Dispatchers
@@ -224,15 +247,9 @@ fun ReaderScreen(
         chapter.paragraphIndex.coerceAtLeast(0)
     }
 
-    val listState = rememberLazyListState(
-        initialFirstVisibleItemIndex = initialParagraphIdx.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
-    )
-
-    // Ensure position jumps accurately if async paragraph splitting finishes for huge files
-    LaunchedEffect(paragraphs.size) {
-        if (paragraphs.size > 1 && initialParagraphIdx > 0 && listState.firstVisibleItemIndex == 0) {
-            listState.scrollToItem(initialParagraphIdx.coerceIn(0, paragraphs.size - 1))
-        }
+    val nativeListViewRef = remember { arrayOfNulls<ListView>(1) }
+    val currentScrollParaIdx = remember(chapter.id) {
+        mutableIntStateOf(initialParagraphIdx.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0)))
     }
 
     val paragraphsPerPage = 6
@@ -241,6 +258,27 @@ fun ReaderScreen(
         initialPage = (initialParagraphIdx / paragraphsPerPage).coerceIn(0, totalPages - 1),
         pageCount = { totalPages }
     )
+
+    val scrollToParagraph: (Int) -> Unit = { targetIdx ->
+        val safeTarget = targetIdx.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+        currentScrollParaIdx.intValue = safeTarget
+        if (effectiveSettings.readingMode == "PAGES") {
+            coroutineScope.launch {
+                pagerState.scrollToPage(safeTarget / paragraphsPerPage)
+            }
+        } else {
+            nativeListViewRef[0]?.setSelectionFromTop(safeTarget, 0)
+        }
+    }
+
+    // Ensure position jumps accurately if async paragraph splitting finishes for huge files
+    LaunchedEffect(paragraphs.size) {
+        if (paragraphs.size > 1 && initialParagraphIdx > 0 && currentScrollParaIdx.intValue == 0) {
+            val safeTarget = initialParagraphIdx.coerceIn(0, paragraphs.size - 1)
+            currentScrollParaIdx.intValue = safeTarget
+            nativeListViewRef[0]?.setSelectionFromTop(safeTarget, 0)
+        }
+    }
 
     // UI Bars & Overlays State
     var barsVisible by remember { mutableStateOf(false) }
@@ -271,7 +309,7 @@ fun ReaderScreen(
         if (effectiveSettings.readingMode == "PAGES") {
             (pagerState.currentPage * paragraphsPerPage).coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
         } else {
-            listState.firstVisibleItemIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+            currentScrollParaIdx.intValue.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
         }
     }
 
@@ -318,7 +356,7 @@ fun ReaderScreen(
                             if (nextIdx < paragraphs.size && isTtsPlaying) {
                                 ttsSpeakingParagraphIndex = nextIdx
                                 coroutineScope.launch {
-                                    listState.animateScrollToItem(nextIdx)
+                                    scrollToParagraph(nextIdx)
                                 }
                                 engine?.speak(
                                     paragraphs[nextIdx],
@@ -367,41 +405,15 @@ fun ReaderScreen(
         }
     }
 
-    // Debounced Background Position Saving (Zero scroll lag on Galaxy M02s!)
-    LaunchedEffect(chapter.id, paragraphs.size, effectiveSettings.readingMode) {
-        snapshotFlow {
-            if (effectiveSettings.readingMode == "PAGES") {
-                pagerState.currentPage * paragraphsPerPage
-            } else {
-                listState.firstVisibleItemIndex
-            }
-        }
-            .distinctUntilChanged()
-            .debounce(2500L)
-            .collectLatest { paraIdx ->
-                if (paragraphs.size > 1) {
-                    val safeIdx = paraIdx.coerceIn(0, paragraphs.size - 1)
-                    val approxCharOffset = (listState.firstVisibleItemScrollOffset / 4).coerceAtLeast(0)
-                    viewModel.saveReadingPosition(
-                        chapterId = chapter.id,
-                        paragraphIndex = safeIdx,
-                        charOffset = approxCharOffset,
-                        totalParagraphs = paragraphs.size
-                    )
-                }
-            }
-    }
-
-    // Save position immediately on Pause / Stop / Exit / App Background
+    // Save position to SQLite ONLY on Pause / Stop / Exit / App Background (Zero SQLite writes during scroll!)
     DisposableEffect(lifecycleOwner, chapter.id, paragraphs.size) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
                 val idx = getCurrentParaIdx()
-                val approxCharOffset = (listState.firstVisibleItemScrollOffset / 4).coerceAtLeast(0)
                 viewModel.saveReadingPosition(
                     chapterId = chapter.id,
                     paragraphIndex = idx,
-                    charOffset = approxCharOffset,
+                    charOffset = 0,
                     totalParagraphs = paragraphs.size
                 )
             }
@@ -410,11 +422,10 @@ fun ReaderScreen(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             val idx = getCurrentParaIdx()
-            val approxCharOffset = (listState.firstVisibleItemScrollOffset / 4).coerceAtLeast(0)
             viewModel.saveReadingPosition(
                 chapterId = chapter.id,
                 paragraphIndex = idx,
-                charOffset = approxCharOffset,
+                charOffset = 0,
                 totalParagraphs = paragraphs.size
             )
         }
@@ -424,7 +435,7 @@ fun ReaderScreen(
     LaunchedEffect(effectiveSettings.autoScrollSpeed, effectiveSettings.readingMode, barsVisible) {
         if (effectiveSettings.autoScrollSpeed > 0f && effectiveSettings.readingMode == "SCROLL" && !barsVisible) {
             while (true) {
-                listState.scrollBy(effectiveSettings.autoScrollSpeed * 1.4f)
+                nativeListViewRef[0]?.scrollListBy((effectiveSettings.autoScrollSpeed * 2.2f).toInt().coerceAtLeast(1))
                 delay(16L)
             }
         }
@@ -521,53 +532,16 @@ fun ReaderScreen(
         else (effectiveSettings.paragraphSpacingDp / 3f).dp
     }
 
+    val nativeReaderTypeface = remember(context, effectiveSettings.fontFamily, effectiveSettings.isBoldWeight) {
+        resolveReaderTypeface(context, effectiveSettings.fontFamily, effectiveSettings.isBoldWeight)
+    }
+
+    val primaryColorInt = MaterialTheme.colorScheme.primary.toArgb()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(readerBgColor)
-            .pointerInput(effectiveSettings.touchZonesMode, effectiveSettings.readingMode) {
-                detectTapGestures(
-                    onTap = { offset ->
-                        val width = size.width
-                        val third = width / 3f
-                        when {
-                            effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x < third -> {
-                                coroutineScope.launch {
-                                    if (effectiveSettings.readingMode == "PAGES") {
-                                        val next = (pagerState.currentPage + 1).coerceAtMost(totalPages - 1)
-                                        pagerState.animateScrollToPage(next)
-                                    } else {
-                                        val target = (getCurrentParaIdx() + 5).coerceAtMost(paragraphs.size - 1)
-                                        listState.scrollToItem(target)
-                                    }
-                                }
-                            }
-                            effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x > third * 2 -> {
-                                coroutineScope.launch {
-                                    if (effectiveSettings.readingMode == "PAGES") {
-                                        val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
-                                        pagerState.animateScrollToPage(prev)
-                                    } else {
-                                        val target = (getCurrentParaIdx() - 5).coerceAtLeast(0)
-                                        listState.scrollToItem(target)
-                                    }
-                                }
-                            }
-                            else -> {
-                                if (selectedParagraphIndex != null) {
-                                    selectedParagraphIndex = null
-                                } else {
-                                    barsVisible = !barsVisible
-                                }
-                            }
-                        }
-                    },
-                    onLongPress = {
-                        val curr = getCurrentParaIdx()
-                        selectedParagraphIndex = if (selectedParagraphIndex == curr) null else curr
-                    }
-                )
-            }
     ) {
         // Main Reading Area: Clipped cleanly below the shaded system status bar so text NEVER overlaps clock/battery/network icons
         if (effectiveSettings.readingMode == "PAGES") {
@@ -577,6 +551,35 @@ fun ReaderScreen(
                     .fillMaxSize()
                     .statusBarsPadding()
                     .navigationBarsPadding()
+                    .pointerInput(effectiveSettings.touchZonesMode) {
+                        detectTapGestures(
+                            onTap = { offset ->
+                                val third = size.width / 3f
+                                when {
+                                    effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x < third -> {
+                                        coroutineScope.launch {
+                                            val next = (pagerState.currentPage + 1).coerceAtMost(totalPages - 1)
+                                            pagerState.animateScrollToPage(next)
+                                        }
+                                    }
+                                    effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x > third * 2 -> {
+                                        coroutineScope.launch {
+                                            val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
+                                            pagerState.animateScrollToPage(prev)
+                                        }
+                                    }
+                                    else -> {
+                                        if (selectedParagraphIndex != null) selectedParagraphIndex = null
+                                        else barsVisible = !barsVisible
+                                    }
+                                }
+                            },
+                            onLongPress = {
+                                val curr = getCurrentParaIdx()
+                                selectedParagraphIndex = if (selectedParagraphIndex == curr) null else curr
+                            }
+                        )
+                    }
                     .padding(
                         start = effectiveSettings.marginHorizontalDp.dp,
                         end = effectiveSettings.marginHorizontalDp.dp,
@@ -618,69 +621,173 @@ fun ReaderScreen(
                 }
             }
         } else {
-            // Ultra-Fast Virtualized LazyColumn optimized for Galaxy M02s (60fps)
-            // statusBarsPadding() on the LazyColumn modifier ensures scrolling text is clipped strictly below the status bar!
-            LazyColumn(
-                state = listState,
-                contentPadding = PaddingValues(
-                    start = effectiveSettings.marginHorizontalDp.dp,
-                    end = effectiveSettings.marginHorizontalDp.dp,
-                    top = effectiveSettings.marginVerticalDp.dp + 8.dp,
-                    bottom = effectiveSettings.marginVerticalDp.dp + 56.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(paragraphSpacing),
+            // Hardware-Accelerated Native Android ListView + Recycled TextView ViewHolders for Locked 60fps on Galaxy M02s!
+            val readerAdapter = remember {
+                ReaderNativeAdapter(
+                    paragraphs = paragraphs,
+                    chapter = chapter,
+                    nextChapter = nextChapter,
+                    previousChapter = previousChapter,
+                    settings = effectiveSettings,
+                    typeface = nativeReaderTypeface,
+                    textColorInt = readerTextColor.toArgb(),
+                    bgColorInt = readerBgColor.toArgb(),
+                    primaryColorInt = primaryColorInt,
+                    annotationsByPara = annotationsByParagraph,
+                    glossaryTerms = activeGlossary,
+                    searchQuery = inTextSearchQuery,
+                    ttsSpeakingIdx = ttsSpeakingParagraphIndex,
+                    selectedParaIdx = selectedParagraphIndex,
+                    onOpenChapter = { targetId ->
+                        viewModel.saveReadingPosition(chapter.id, (paragraphs.size - 1).coerceAtLeast(0), 0, paragraphs.size)
+                        viewModel.openChapterForReading(targetId)
+                    },
+                    onChangeStage = { newStage ->
+                        viewModel.updateChapter(chapter.copy(translatorStage = newStage))
+                    }
+                )
+            }
+
+            AndroidView(
+                factory = { ctx ->
+                    var lastTouchX = 0f
+                    ListView(ctx).apply {
+                        nativeListViewRef[0] = this
+                        divider = null
+                        dividerHeight = 0
+                        clipToPadding = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
+                        isVerticalScrollBarEnabled = true
+                        isFastScrollEnabled = false
+                        selector = ColorDrawable(android.graphics.Color.TRANSPARENT)
+                        cacheColorHint = readerBgColor.toArgb()
+
+                        val density = ctx.resources.displayMetrics.density
+                        val hPad = (effectiveSettings.marginHorizontalDp * density).toInt()
+                        val vPadTop = ((effectiveSettings.marginVerticalDp + 8f) * density).toInt()
+                        val vPadBottom = ((effectiveSettings.marginVerticalDp + 56f) * density).toInt()
+                        setPadding(hPad, vPadTop, hPad, vPadBottom)
+
+                        adapter = readerAdapter
+
+                        val startIdx = initialParagraphIdx.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+                        if (startIdx > 0) {
+                            post { setSelectionFromTop(startIdx, 0) }
+                        }
+
+                        setOnTouchListener { _, event ->
+                            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                                lastTouchX = event.x
+                            }
+                            false
+                        }
+
+                        setOnItemClickListener { _, _, position, _ ->
+                            if (position < readerAdapter.paragraphs.size) {
+                                val width = width.toFloat().coerceAtLeast(1f)
+                                val third = width / 3f
+                                val zones = readerAdapter.settings.touchZonesMode
+                                when {
+                                    zones == "SIDES_FLIP" && lastTouchX < third -> {
+                                        val target = (currentScrollParaIdx.intValue + 5)
+                                            .coerceAtMost((readerAdapter.paragraphs.size - 1).coerceAtLeast(0))
+                                        currentScrollParaIdx.intValue = target
+                                        setSelectionFromTop(target, 0)
+                                    }
+                                    zones == "SIDES_FLIP" && lastTouchX > third * 2f -> {
+                                        val target = (currentScrollParaIdx.intValue - 5).coerceAtLeast(0)
+                                        currentScrollParaIdx.intValue = target
+                                        setSelectionFromTop(target, 0)
+                                    }
+                                    else -> {
+                                        if (selectedParagraphIndex != null) {
+                                            selectedParagraphIndex = null
+                                        } else {
+                                            barsVisible = !barsVisible
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        setOnItemLongClickListener { view, _, position, _ ->
+                            if (position < readerAdapter.paragraphs.size) {
+                                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                selectedParagraphIndex = if (selectedParagraphIndex == position) null else position
+                                true
+                            } else {
+                                false
+                            }
+                        }
+
+                        setOnScrollListener(object : AbsListView.OnScrollListener {
+                            override fun onScrollStateChanged(view: AbsListView?, scrollState: Int) {}
+                            override fun onScroll(
+                                view: AbsListView?,
+                                firstVisibleItem: Int,
+                                visibleItemCount: Int,
+                                totalItemCount: Int
+                            ) {
+                                val paraCount = readerAdapter.paragraphs.size
+                                if (paraCount > 0) {
+                                    val safeIdx = firstVisibleItem.coerceIn(0, paraCount - 1)
+                                    if (safeIdx != currentScrollParaIdx.intValue) {
+                                        currentScrollParaIdx.intValue = safeIdx
+                                        viewModel.updateInMemoryReadingPosition(
+                                            chapterId = readerAdapter.chapter.id,
+                                            paragraphIndex = safeIdx,
+                                            charOffset = 0,
+                                            totalParagraphs = paraCount
+                                        )
+                                    }
+                                }
+                            }
+                        })
+                    }
+                },
+                update = { listView ->
+                    nativeListViewRef[0] = listView
+                    val density = listView.resources.displayMetrics.density
+                    val hPad = (effectiveSettings.marginHorizontalDp * density).toInt()
+                    val vPadTop = ((effectiveSettings.marginVerticalDp + 8f) * density).toInt()
+                    val vPadBottom = ((effectiveSettings.marginVerticalDp + 56f) * density).toInt()
+                    if (listView.paddingLeft != hPad || listView.paddingTop != vPadTop || listView.paddingBottom != vPadBottom) {
+                        listView.setPadding(hPad, vPadTop, hPad, vPadBottom)
+                    }
+                    listView.cacheColorHint = readerBgColor.toArgb()
+
+                    val chapterChanged = readerAdapter.chapter.id != chapter.id
+                    val changed = readerAdapter.updateData(
+                        newParagraphs = paragraphs,
+                        newChapter = chapter,
+                        newNextChapter = nextChapter,
+                        newPreviousChapter = previousChapter,
+                        newSettings = effectiveSettings,
+                        newTypeface = nativeReaderTypeface,
+                        newTextColorInt = readerTextColor.toArgb(),
+                        newBgColorInt = readerBgColor.toArgb(),
+                        newPrimaryColorInt = primaryColorInt,
+                        newAnnotationsByPara = annotationsByParagraph,
+                        newGlossaryTerms = activeGlossary,
+                        newSearchQuery = inTextSearchQuery,
+                        newTtsSpeakingIdx = ttsSpeakingParagraphIndex,
+                        newSelectedParaIdx = selectedParagraphIndex
+                    )
+                    if (changed) {
+                        readerAdapter.notifyDataSetChanged()
+                    }
+                    if (chapterChanged) {
+                        val startIdx = chapter.paragraphIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+                        currentScrollParaIdx.intValue = startIdx
+                        listView.post { listView.setSelectionFromTop(startIdx, 0) }
+                    }
+                },
                 modifier = Modifier
                     .fillMaxSize()
                     .statusBarsPadding()
                     .navigationBarsPadding()
                     .testTag("reader_lazy_column")
-            ) {
-                itemsIndexed(
-                    items = paragraphs,
-                    key = { idx, _ -> idx },
-                    contentType = { _, _ -> 0 }
-                ) { idx, paraText ->
-                    // Zero-overhead fast path: renders a single flat Text node directly when no special formatting applies
-                    if (!hasGlobalFormatting && ttsSpeakingParagraphIndex != idx && selectedParagraphIndex != idx) {
-                        Text(
-                            text = paraText,
-                            style = paragraphTextStyle,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    } else {
-                        ReaderParagraphItem(
-                            paragraphIndex = idx,
-                            paragraphText = paraText,
-                            textStyle = paragraphTextStyle,
-                            annotations = annotationsByParagraph[idx] ?: emptyList(),
-                            glossaryTerms = activeGlossary,
-                            searchQuery = inTextSearchQuery,
-                            isTtsSpeaking = ttsSpeakingParagraphIndex == idx,
-                            isSelected = selectedParagraphIndex == idx
-                        )
-                    }
-                }
-
-                // End of Chapter Footer Card
-                item(key = "chapter_footer", contentType = 1) {
-                    EndOfChapterFooterCard(
-                        chapter = chapter,
-                        nextChapter = nextChapter,
-                        previousChapter = previousChapter,
-                        autoOpenNext = effectiveSettings.autoOpenNextChapter,
-                        onToggleAutoOpenNext = { enabled ->
-                            viewModel.updateSettings { it.copy(autoOpenNextChapter = enabled) }
-                        },
-                        onOpenChapter = { targetId ->
-                            viewModel.saveReadingPosition(chapter.id, paragraphs.size - 1, 0, paragraphs.size)
-                            viewModel.openChapterForReading(targetId)
-                        },
-                        onChangeTranslatorStage = { newStage ->
-                            viewModel.updateChapter(chapter.copy(translatorStage = newStage))
-                        }
-                    )
-                }
-            }
+            )
         }
 
         // Warm Eye-Care Filter Overlay
@@ -708,7 +815,7 @@ fun ReaderScreen(
         // Isolated Chapter Progress Edge Bar (Chapter progress only — lightweight static Box bar)
         if (effectiveSettings.showThinEdgeProgress && !barsVisible) {
             ChapterEdgeProgressOverlay(
-                listState = listState,
+                currentScrollParaState = currentScrollParaIdx,
                 pagerState = pagerState,
                 readingMode = effectiveSettings.readingMode,
                 paragraphsCount = paragraphs.size,
@@ -748,14 +855,8 @@ fun ReaderScreen(
                     TextButton(
                         onClick = {
                             showResumeBanner = false
-                            coroutineScope.launch {
-                                if (effectiveSettings.readingMode == "PAGES") {
-                                    pagerState.scrollToPage(0)
-                                } else {
-                                    listState.scrollToItem(0)
-                                }
-                                viewModel.saveReadingPosition(chapter.id, 0, 0, paragraphs.size)
-                            }
+                            scrollToParagraph(0)
+                            viewModel.saveReadingPosition(chapter.id, 0, 0, paragraphs.size)
                         }
                     ) {
                         Text("من البداية", color = MaterialTheme.colorScheme.inversePrimary, fontWeight = FontWeight.Bold)
@@ -1042,7 +1143,7 @@ fun ReaderScreen(
                                     if (searchMatchingParagraphIndices.isNotEmpty()) {
                                         currentSearchMatchIdx = (currentSearchMatchIdx + 1) % searchMatchingParagraphIndices.size
                                         val targetPara = searchMatchingParagraphIndices[currentSearchMatchIdx]
-                                        coroutineScope.launch { listState.scrollToItem(targetPara) }
+                                        scrollToParagraph(targetPara)
                                     }
                                 }
                             ) {
@@ -1194,13 +1295,7 @@ fun ReaderScreen(
                             value = activeParaIdx.toFloat(),
                             onValueChange = { newIdxFloat ->
                                 val target = newIdxFloat.toInt().coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
-                                coroutineScope.launch {
-                                    if (effectiveSettings.readingMode == "PAGES") {
-                                        pagerState.scrollToPage(target / paragraphsPerPage)
-                                    } else {
-                                        listState.scrollToItem(target)
-                                    }
-                                }
+                                scrollToParagraph(target)
                             },
                             valueRange = 0f..(paragraphs.size - 1).coerceAtLeast(1).toFloat(),
                             modifier = Modifier
@@ -1443,7 +1538,7 @@ fun ReaderScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChapterEdgeProgressOverlay(
-    listState: androidx.compose.foundation.lazy.LazyListState,
+    currentScrollParaState: androidx.compose.runtime.IntState,
     pagerState: androidx.compose.foundation.pager.PagerState,
     readingMode: String,
     paragraphsCount: Int,
@@ -1454,15 +1549,11 @@ private fun ChapterEdgeProgressOverlay(
     modifier: Modifier = Modifier
 ) {
     // Reading scroll state inside this tiny leaf composable means ONLY this 20dp bar recomposes on scroll,
-    // leaving the entire ReaderScreen and LazyColumn untouched for 60fps performance on Galaxy M02s!
-    val currentParaIdx by remember(readingMode, paragraphsCount, paragraphsPerPage) {
-        derivedStateOf {
-            if (readingMode == "PAGES") {
-                (pagerState.currentPage * paragraphsPerPage).coerceIn(0, (paragraphsCount - 1).coerceAtLeast(0))
-            } else {
-                listState.firstVisibleItemIndex.coerceIn(0, (paragraphsCount - 1).coerceAtLeast(0))
-            }
-        }
+    // leaving the entire ReaderScreen untouched for 60fps performance on Galaxy M02s!
+    val currentParaIdx = if (readingMode == "PAGES") {
+        (pagerState.currentPage * paragraphsPerPage).coerceIn(0, (paragraphsCount - 1).coerceAtLeast(0))
+    } else {
+        currentScrollParaState.intValue.coerceIn(0, (paragraphsCount - 1).coerceAtLeast(0))
     }
     val progressFraction = if (paragraphsCount <= 1) 1f else (currentParaIdx.toFloat() / (paragraphsCount - 1).toFloat()).coerceIn(0f, 1f)
     val progressPct = (progressFraction * 100f).toInt()
@@ -1507,6 +1598,370 @@ private fun ChapterEdgeProgressOverlay(
                     .height(3.dp)
                     .background(MaterialTheme.colorScheme.primary)
             )
+        }
+    }
+}
+
+/**
+ * Hardware-Accelerated Native Android BaseAdapter with ViewHolder recycling for locked 60fps scrolling on Galaxy M02s.
+ */
+private class ReaderNativeAdapter(
+    var paragraphs: List<String>,
+    var chapter: ChapterEntity,
+    var nextChapter: ChapterEntity?,
+    var previousChapter: ChapterEntity?,
+    var settings: ReaderSettings,
+    var typeface: Typeface,
+    var textColorInt: Int,
+    var bgColorInt: Int,
+    var primaryColorInt: Int,
+    var annotationsByPara: Map<Int, List<AnnotationEntity>>,
+    var glossaryTerms: List<GlossaryEntity>,
+    var searchQuery: String,
+    var ttsSpeakingIdx: Int,
+    var selectedParaIdx: Int?,
+    val onOpenChapter: (Long) -> Unit,
+    val onChangeStage: (String) -> Unit
+) : BaseAdapter() {
+
+    private class ParagraphViewHolder(
+        val textView: TextView,
+        var appliedStyleSignature: Int = 0
+    )
+
+    private var currentStyleSignature: Int = computeStyleSignature()
+
+    private fun computeStyleSignature(): Int {
+        var result = settings.fontFamily.hashCode()
+        result = 31 * result + settings.fontSizeSp.hashCode()
+        result = 31 * result + settings.isBoldWeight.hashCode()
+        result = 31 * result + settings.lineHeightMultiplier.hashCode()
+        result = 31 * result + settings.letterSpacingSp.hashCode()
+        result = 31 * result + settings.textAlign.hashCode()
+        result = 31 * result + settings.paragraphSpacingDp.hashCode()
+        result = 31 * result + settings.emptyLineBetweenParagraphs.hashCode()
+        result = 31 * result + textColorInt
+        return result
+    }
+
+    fun updateData(
+        newParagraphs: List<String>,
+        newChapter: ChapterEntity,
+        newNextChapter: ChapterEntity?,
+        newPreviousChapter: ChapterEntity?,
+        newSettings: ReaderSettings,
+        newTypeface: Typeface,
+        newTextColorInt: Int,
+        newBgColorInt: Int,
+        newPrimaryColorInt: Int,
+        newAnnotationsByPara: Map<Int, List<AnnotationEntity>>,
+        newGlossaryTerms: List<GlossaryEntity>,
+        newSearchQuery: String,
+        newTtsSpeakingIdx: Int,
+        newSelectedParaIdx: Int?
+    ): Boolean {
+        val oldSig = currentStyleSignature
+        val changed = paragraphs !== newParagraphs ||
+            chapter.id != newChapter.id ||
+            chapter.translatorStage != newChapter.translatorStage ||
+            nextChapter?.id != newNextChapter?.id ||
+            previousChapter?.id != newPreviousChapter?.id ||
+            annotationsByPara != newAnnotationsByPara ||
+            glossaryTerms != newGlossaryTerms ||
+            searchQuery != newSearchQuery ||
+            ttsSpeakingIdx != newTtsSpeakingIdx ||
+            selectedParaIdx != newSelectedParaIdx ||
+            settings.firstLineIndentDp != newSettings.firstLineIndentDp
+
+        paragraphs = newParagraphs
+        chapter = newChapter
+        nextChapter = newNextChapter
+        previousChapter = newPreviousChapter
+        settings = newSettings
+        typeface = newTypeface
+        textColorInt = newTextColorInt
+        bgColorInt = newBgColorInt
+        primaryColorInt = newPrimaryColorInt
+        annotationsByPara = newAnnotationsByPara
+        glossaryTerms = newGlossaryTerms
+        searchQuery = newSearchQuery
+        ttsSpeakingIdx = newTtsSpeakingIdx
+        selectedParaIdx = newSelectedParaIdx
+        currentStyleSignature = computeStyleSignature()
+
+        return changed || oldSig != currentStyleSignature
+    }
+
+    override fun getCount(): Int = paragraphs.size + 1
+
+    override fun getItem(position: Int): Any = if (position < paragraphs.size) paragraphs[position] else "FOOTER"
+
+    override fun getItemId(position: Int): Long = position.toLong()
+
+    override fun getViewTypeCount(): Int = 2
+
+    override fun getItemViewType(position: Int): Int = if (position < paragraphs.size) 0 else 1
+
+    override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+        val context = parent.context
+        if (getItemViewType(position) == 1) {
+            return buildFooterView(context)
+        }
+
+        val holder: ParagraphViewHolder
+        val view: TextView
+        if (convertView == null || convertView.tag !is ParagraphViewHolder) {
+            view = TextView(context).apply {
+                layoutParams = AbsListView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                includeFontPadding = false
+                isClickable = false
+                isFocusable = false
+                isLongClickable = false
+                textDirection = View.TEXT_DIRECTION_ANY_RTL
+            }
+            holder = ParagraphViewHolder(view, 0)
+            view.tag = holder
+        } else {
+            view = convertView as TextView
+            holder = view.tag as ParagraphViewHolder
+        }
+
+        if (holder.appliedStyleSignature != currentStyleSignature) {
+            applyStyleToTextView(context, view)
+            holder.appliedStyleSignature = currentStyleSignature
+        }
+
+        val rawPara = paragraphs[position]
+        val paraText = if (settings.firstLineIndentDp > 0.5f) "    $rawPara" else rawPara
+        val anns = annotationsByPara[position]
+        val isTts = ttsSpeakingIdx == position
+        val isSel = selectedParaIdx == position
+        val hasSearch = searchQuery.isNotBlank() && paraText.contains(searchQuery, ignoreCase = true)
+        val hasGlossary = glossaryTerms.isNotEmpty() && glossaryTerms.any { it.term.isNotBlank() && paraText.contains(it.term) }
+
+        if (anns.isNullOrEmpty() && !isTts && !isSel && !hasSearch && !hasGlossary) {
+            view.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            view.text = paraText
+        } else {
+            when {
+                isTts -> view.setBackgroundColor(android.graphics.Color.argb(45, 217, 119, 6))
+                isSel -> view.setBackgroundColor(android.graphics.Color.argb(55, 59, 130, 246))
+                else -> view.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            }
+            val sb = SpannableStringBuilder(paraText)
+            if (hasGlossary) {
+                for (g in glossaryTerms) {
+                    if (g.term.isNotBlank()) {
+                        var startIdx = paraText.indexOf(g.term)
+                        val hlCol = parseAndroidColorSafe(g.highlightColorHex, 0x66FDE047)
+                        while (startIdx >= 0) {
+                            val endIdx = startIdx + g.term.length
+                            sb.setSpan(BackgroundColorSpan(hlCol), startIdx, endIdx, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            sb.setSpan(StyleSpan(Typeface.BOLD), startIdx, endIdx, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            startIdx = paraText.indexOf(g.term, endIdx)
+                        }
+                    }
+                }
+            }
+            if (!anns.isNullOrEmpty()) {
+                for (ann in anns) {
+                    val col = parseAndroidColorSafe(ann.colorHex, 0x77FDE047)
+                    sb.setSpan(BackgroundColorSpan(col), 0, paraText.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                for (ann in anns) {
+                    if (ann.noteText.isNotBlank()) {
+                        val noteStart = sb.length
+                        sb.append("\n📝 ${ann.noteText}")
+                        sb.setSpan(StyleSpan(Typeface.BOLD), noteStart, sb.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }
+            }
+            if (hasSearch) {
+                var idx = paraText.indexOf(searchQuery, ignoreCase = true)
+                while (idx >= 0) {
+                    val end = idx + searchQuery.length
+                    sb.setSpan(BackgroundColorSpan(0xFFF59E0B.toInt()), idx, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    sb.setSpan(ForegroundColorSpan(android.graphics.Color.BLACK), idx, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    sb.setSpan(StyleSpan(Typeface.BOLD), idx, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    idx = paraText.indexOf(searchQuery, end, ignoreCase = true)
+                }
+            }
+            view.text = sb
+        }
+
+        return view
+    }
+
+    private fun applyStyleToTextView(context: Context, tv: TextView) {
+        val density = context.resources.displayMetrics.density
+        val spacingDp = if (settings.emptyLineBetweenParagraphs) settings.paragraphSpacingDp else (settings.paragraphSpacingDp / 3f)
+        val halfPadPx = ((spacingDp * density) / 2f).toInt().coerceAtLeast(2)
+
+        tv.setPadding(0, halfPadPx, 0, halfPadPx)
+        tv.typeface = typeface
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, settings.fontSizeSp)
+        tv.setTextColor(textColorInt)
+        tv.setLineSpacing(0f, settings.lineHeightMultiplier)
+        tv.letterSpacing = (settings.letterSpacingSp / settings.fontSizeSp.coerceAtLeast(12f)).coerceIn(-0.05f, 0.3f)
+
+        when (settings.textAlign) {
+            "LEFT" -> {
+                tv.gravity = Gravity.LEFT
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    tv.justificationMode = Layout.JUSTIFICATION_MODE_NONE
+                }
+            }
+            "CENTER" -> {
+                tv.gravity = Gravity.CENTER_HORIZONTAL
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    tv.justificationMode = Layout.JUSTIFICATION_MODE_NONE
+                }
+            }
+            "JUSTIFY" -> {
+                tv.gravity = Gravity.RIGHT
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    tv.justificationMode = Layout.JUSTIFICATION_MODE_INTER_WORD
+                }
+            }
+            else -> {
+                tv.gravity = Gravity.RIGHT
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    tv.justificationMode = Layout.JUSTIFICATION_MODE_NONE
+                }
+            }
+        }
+    }
+
+    private fun buildFooterView(context: Context): View {
+        val density = context.resources.displayMetrics.density
+        val pad20 = (20 * density).toInt()
+        val pad12 = (12 * density).toInt()
+        val pad8 = (8 * density).toInt()
+
+        val cardLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = AbsListView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(pad20, (28 * density).toInt(), pad20, (32 * density).toInt())
+        }
+
+        val innerBox = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(pad20, pad20, pad20, pad20)
+            background = GradientDrawable().apply {
+                cornerRadius = 20f * density
+                setColor(android.graphics.Color.argb(32, 128, 128, 128))
+            }
+        }
+
+        val titleTv = TextView(context).apply {
+            text = "نهاية «${chapter.title}»"
+            setTextColor(textColorInt)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        innerBox.addView(titleTv)
+
+        val stagesRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, pad12, 0, pad12)
+        }
+        listOf("DRAFT" to "مسودة", "REVIEWED" to "مُراجَع", "FINAL" to "نهائي").forEach { (stage, label) ->
+            val selected = chapter.translatorStage == stage
+            val chipTv = TextView(context).apply {
+                text = label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextColor(if (selected) android.graphics.Color.WHITE else textColorInt)
+                setPadding(pad12, pad8, pad12, pad8)
+                background = GradientDrawable().apply {
+                    cornerRadius = 16f * density
+                    setColor(if (selected) primaryColorInt else android.graphics.Color.argb(40, 128, 128, 128))
+                }
+                setOnClickListener { onChangeStage(stage) }
+            }
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = (4 * density).toInt()
+                marginEnd = (4 * density).toInt()
+            }
+            stagesRow.addView(chipTv, lp)
+        }
+        innerBox.addView(stagesRow)
+
+        val next = nextChapter
+        if (next != null) {
+            val nextBtn = TextView(context).apply {
+                text = "الفصل التالي: ${next.title}"
+                setTextColor(android.graphics.Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(pad20, pad12, pad20, pad12)
+                background = GradientDrawable().apply {
+                    cornerRadius = 24f * density
+                    setColor(primaryColorInt)
+                }
+                setOnClickListener { onOpenChapter(next.id) }
+            }
+            val nextLp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = pad8
+            }
+            innerBox.addView(nextBtn, nextLp)
+        } else {
+            val doneTv = TextView(context).apply {
+                text = "وصلت إلى آخر فصل في هذه المجموعة"
+                setTextColor(textColorInt)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                gravity = Gravity.CENTER
+                setPadding(0, pad8, 0, pad8)
+            }
+            innerBox.addView(doneTv)
+        }
+
+        val prev = previousChapter
+        if (prev != null) {
+            val prevBtn = TextView(context).apply {
+                text = "الفصل السابق: ${prev.title}"
+                setTextColor(primaryColorInt)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(pad12, pad12, pad12, pad8)
+                setOnClickListener { onOpenChapter(prev.id) }
+            }
+            innerBox.addView(prevBtn)
+        }
+
+        cardLayout.addView(
+            innerBox,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        return cardLayout
+    }
+
+    private fun parseAndroidColorSafe(hex: String, fallback: Int): Int {
+        return try {
+            val raw = android.graphics.Color.parseColor(hex)
+            android.graphics.Color.argb(110, android.graphics.Color.red(raw), android.graphics.Color.green(raw), android.graphics.Color.blue(raw))
+        } catch (_: Exception) {
+            fallback
         }
     }
 }
